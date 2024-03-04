@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"image/color"
 	"io"
@@ -18,6 +19,21 @@ import (
 	"gonum.org/v1/plot/vg/draw"
 	"gonum.org/v1/plot/vg/vgimg"
 )
+
+type stats struct {
+	title string
+
+	unigrams map[string]int
+	bigrams  map[string]int
+}
+
+func newStats(title string) stats {
+	var s stats
+	s.title = title
+	s.unigrams = make(map[string]int)
+	s.bigrams = make(map[string]int)
+	return s
+}
 
 func main() {
 	if err := run(os.Args, os.Stdout); err != nil {
@@ -40,53 +56,31 @@ func run(args []string, stdout io.Writer) error {
 	}
 	defer input.Close()
 
-	fmt.Println("Calculating unigrams...")
+	stats := newStats(title)
 
-	uniData, err := unigrams(input)
+	fmt.Println("Calculating statistics...")
+
+	if err := stats.calculate(input); err != nil {
+		return err
+	}
+
+	fmt.Println("Generating graph for unigrams...")
+
+	path, err := stats.graphUnigrams()
 	if err != nil {
 		return err
 	}
 
-	uniPath := fmt.Sprintf("%s_unigrams.png", title)
-	uniTitle := fmt.Sprintf("%s unigrams", title)
+	fmt.Printf("Graph for unigrams has been generated at: %s\n", path)
 
-	uniOut, err := os.Create(uniPath)
-	if err != nil {
-		return err
-	}
-	defer uniOut.Close()
+	fmt.Println("Generating graph for bigrams...")
 
-	err = graph(uniTitle, uniData, uniOut)
+	path, err = stats.graphBigrams()
 	if err != nil {
 		return err
 	}
 
-	fmt.Printf("Graph %s has been generated\n", uniPath)
-
-	fmt.Println("Calculating bigrams...")
-
-	biData, err := bigrams(input)
-	if err != nil {
-		return err
-	}
-
-	fmt.Println("heeere")
-
-	biPath := fmt.Sprintf("%s_bigrams.png", title)
-	biTitle := fmt.Sprintf("%s bigrams", title)
-
-	biOut, err := os.Create(biPath)
-	if err != nil {
-		return err
-	}
-	defer biOut.Close()
-
-	err = graph(biTitle, biData, biOut)
-	if err != nil {
-		return err
-	}
-
-	fmt.Printf("Graph %s has been generated\n", biPath)
+	fmt.Printf("Graph for bigrams has been generated at: %s\n", path)
 
 	return nil
 }
@@ -99,33 +93,9 @@ func isSymbol(c rune) bool {
 	return strings.ContainsRune("^<>$%{()}=~[]_#@&*'`\\+-/\"|!;:?", c)
 }
 
-func unigrams(f io.Reader) (map[string]int, error) {
-	r := bufio.NewReader(f)
+func (s stats) calculate(input io.Reader) error {
+	r := bufio.NewReader(input)
 
-	res := make(map[string]int)
-
-	for {
-		c, _, err := r.ReadRune()
-		if err == io.EOF {
-			break
-		}
-
-		if err != nil {
-			return nil, err
-		}
-
-		if isSymbol(c) {
-			res[string(c)] += 1
-		}
-	}
-
-	return res, nil
-}
-
-func bigrams(f io.Reader) (map[string]int, error) {
-	r := bufio.NewReader(f)
-
-	res := make(map[string]int)
 	var prev *rune
 
 	for {
@@ -135,7 +105,7 @@ func bigrams(f io.Reader) (map[string]int, error) {
 		}
 
 		if err != nil {
-			return nil, err
+			return err
 		}
 
 		if unicode.IsSpace(c) && c != '\n' && c != '\r' {
@@ -147,6 +117,10 @@ func bigrams(f io.Reader) (map[string]int, error) {
 			continue
 		}
 
+		if !unicode.IsDigit(c) {
+			s.unigrams[string(c)] += 1
+		}
+
 		if prev != nil {
 			// do not count double digits
 			if unicode.IsDigit(*prev) && unicode.IsDigit(c) {
@@ -154,29 +128,58 @@ func bigrams(f io.Reader) (map[string]int, error) {
 				continue
 			}
 
-			res[fmt.Sprintf("%c%c", *prev, c)] += 1
+			s.bigrams[fmt.Sprintf("%c%c", *prev, c)] += 1
 		}
 
 		prev = &c
 	}
 
-	return res, nil
+	return nil
+}
+
+func (s stats) graphUnigrams() (string, error) {
+	path := s.title + "_unigrams.png"
+
+	file, err := os.Create(path)
+	if err != nil {
+		return path, err
+	}
+	defer file.Close()
+
+	err = graph(s.title+" unigrams", s.unigrams, file)
+	if err != nil {
+		return path, err
+	}
+
+	return path, nil
+}
+
+func (s stats) graphBigrams() (string, error) {
+	path := s.title + "_bigrams.png"
+
+	file, err := os.Create(path)
+	if err != nil {
+		return path, err
+	}
+	defer file.Close()
+
+	err = graph(s.title+" bigrams", s.bigrams, file)
+	if err != nil {
+		return path, err
+	}
+
+	return path, nil
 }
 
 func graph(title string, data map[string]int, out io.Writer) error {
+	if len(data) == 0 {
+		return errors.New("cannot graph as data is empty")
+	}
+
 	p := plot.New()
 	p.Title.Text = title
 
-	// sort by frequency in descending order
-	keys := make([]string, 0, len(data))
-	for key := range data {
-		keys = append(keys, key)
-	}
-
-	sort.SliceStable(keys, func(i, j int) bool {
-		return data[keys[i]] > data[keys[j]]
-	})
-
+	keys := sortedKeys(data)
 	xyData := make(plotter.XYs, len(keys))
 
 	for i, key := range keys {
@@ -225,4 +228,18 @@ func graph(title string, data map[string]int, out io.Writer) error {
 	}
 
 	return nil
+}
+
+func sortedKeys(input map[string]int) []string {
+	keys := make([]string, 0, len(input))
+
+	for key := range input {
+		keys = append(keys, key)
+	}
+
+	sort.SliceStable(keys, func(i, j int) bool {
+		return input[keys[i]] > input[keys[j]]
+	})
+
+	return keys
 }
